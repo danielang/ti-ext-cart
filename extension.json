@@ -2,10 +2,14 @@
   "code": "igniter.cart",
   "name": "Cart",
   "description": "Easily add a shopping cart to your site. The most powerful way to sell your menu items.",
-  "version": "v2.0.0-beta.10",
+  "version": "v2.1.5",
   "author": "SamPoyigi",
-  "icon": "fa-shopping-cart",
-  "homepage": "https://github.com/tastyigniter/ti-ext-cart",
+  "icon": {
+    "class": "fa fa-shopping-cart",
+    "color": "#FFF",
+    "backgroundColor": "#ED561A"
+  },
+  "homepage": "https://tastyigniter.com/marketplace/item/igniter-cart",
   "require": {
     "igniter.local": "*",
     "igniter.user": "*",

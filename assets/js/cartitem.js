@@ -44,8 +44,6 @@
     }
 
     CartItem.prototype.onSubmitForm = function (event) {
-        // event.preventDefault()
-        // this.$form.submit()
     }
 
     CartItem.prototype.onControlQuantity = function (event) {
@@ -58,6 +56,8 @@
         } else {
             $input.val((oldValue > 0) ? oldValue - this.options.minQuantity : 0)
         }
+        
+        $input.trigger('input');
     }
 
     CartItem.DEFAULTS = {

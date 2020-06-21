@@ -3,7 +3,6 @@
 namespace Igniter\Cart\Classes;
 
 use Admin\Models\Addresses_model;
-use Admin\Models\Payments_model;
 use ApplicationException;
 use Auth;
 use Cart;
@@ -11,15 +10,17 @@ use Event;
 use Igniter\Cart\Models\Orders_model;
 use Igniter\Flame\Cart\CartCondition;
 use Igniter\Flame\Traits\Singleton;
-use Location;
+use Igniter\Local\Classes\CoveredArea;
+use Illuminate\Support\Facades\App;
 use Request;
-use Session;
+use System\Traits\SessionMaker;
 
 class OrderManager
 {
     use Singleton;
+    use SessionMaker;
 
-    protected $sessionKey = 'igniter.checkout.order.id';
+    protected $sessionKey = 'igniter.checkout.order';
 
     /**
      * @var \Igniter\Flame\Cart\Cart
@@ -38,8 +39,8 @@ class OrderManager
 
     public function initialize()
     {
-        $this->cart = Cart::instance();
-        $this->location = Location::instance();
+        $this->cart = App::make('cart');
+        $this->location = App::make('location');
         $this->customer = Auth::customer();
     }
 
@@ -51,10 +52,15 @@ class OrderManager
         return $this->customer->getKey();
     }
 
-    /**
-     * @return \Igniter\Cart\Models\Orders_model
-     */
     public function getOrder()
+    {
+        return $this->loadOrder();
+    }
+
+    /**
+     * @return \Admin\Models\Orders_model
+     */
+    public function loadOrder()
     {
         $id = $this->getCurrentOrderId();
 
@@ -71,9 +77,24 @@ class OrderManager
         return $order;
     }
 
-    public function getOrderByHash($code)
+    /**
+     * @param $hash
+     * @param \Admin\Models\Customers_model|null $customer
+     * @return \Admin\Models\Orders_model|\Illuminate\Database\Eloquent\Model|object|null
+     */
+    public function getOrderByHash($hash, $customer = null)
     {
-        return Orders_model::whereHash($code)->first();
+        $query = Orders_model::whereHash($hash);
+
+        if (!is_null($customer))
+            $query->where('customer_id', $customer->getKey());
+
+        return $query->first();
+    }
+
+    public function getDefaultPayment()
+    {
+        return $this->getPaymentGateways()->where('is_default', TRUE)->first();
     }
 
     /**
@@ -82,32 +103,73 @@ class OrderManager
      */
     public function getPayment($code)
     {
-        return Payments_model::whereCode($code)->first();
+        return $this->getPaymentGateways()->where('code', $code)->first();
     }
 
     public function getPaymentGateways()
     {
-        return $this->location->current()->listAvailablePayments();
+        return $this->location->current()->listAvailablePayments()->sortBy('priority');
+    }
+
+    public function findDeliveryAddress($addressId)
+    {
+        if (empty($addressId))
+            return null;
+
+        return Addresses_model::find($addressId);
+    }
+
+    //
+    //
+    //
+
+    public function validateCustomer($customer)
+    {
+        if (!setting('guest_order') AND !$customer)
+            throw new ApplicationException(lang('igniter.cart::default.checkout.alert_customer_not_logged'));
+    }
+
+    public function validateDeliveryAddress(array $address)
+    {
+        if (!array_get($address, 'country') AND isset($address['country_id']))
+            $address['country'] = app('country')->getCountryNameById($address['country_id']);
+
+        $addressString = implode(' ', array_only($address, [
+            'address_1', 'address_2', 'city', 'state', 'postcode', 'country',
+        ]));
+
+        if (!$this->location->requiresUserPosition())
+            return;
+
+        $collection = app('geocoder')->geocode($addressString);
+        if (!$collection OR $collection->isEmpty())
+            throw new ApplicationException(lang('igniter.local::default.alert_invalid_search_query'));
+
+        if (!$area = $this->location->current()->searchDeliveryArea($collection->first()->getCoordinates()))
+            throw new ApplicationException(lang('igniter.cart::default.checkout.error_covered_area'));
+
+        if (!$this->location->isCurrentAreaId($area->area_id)) {
+            $this->location->setCoveredArea(new CoveredArea($area));
+            throw new ApplicationException(lang('igniter.cart::default.checkout.alert_delivery_area_changed'));
+        }
     }
 
     /**
-     * @param $order \Igniter\Cart\Models\Orders_model
+     * @param $order \Admin\Models\Orders_model
      * @param $data
      *
-     * @return Orders_model
+     * @return \Admin\Models\Orders_model
      */
-    public function saveOrder($order, $data)
+    public function saveOrder($order, array $data)
     {
         Event::fire('igniter.checkout.beforeSaveOrder', [$order, $data]);
-
-        $customerId = $this->getCustomerId();
 
         if ($this->customer)
             $data['email'] = $this->customer->email;
 
         $addressId = null;
         if ($address = array_get($data, 'address', [])) {
-            $address['customer_id'] = $customerId;
+            $address['customer_id'] = $this->getCustomerId();
 
             $addressId = array_get($data, 'address_id');
             $addressId = !empty($addressId) ? $addressId : Addresses_model::createOrUpdateFromRequest($address)->getKey();
@@ -126,7 +188,7 @@ class OrderManager
 
         $this->setCurrentOrderId($order->order_id);
 
-        $order->addOrderMenus(Cart::content()->toArray());
+        $order->addOrderMenus(Cart::content()->all());
         $order->addOrderTotals($this->getCartTotals());
 
         // Lets log the coupon so we can redeem it later
@@ -136,7 +198,7 @@ class OrderManager
         return $order;
     }
 
-    public function processPayment($order, $data)
+    public function processPayment($order, array $data)
     {
         Event::fire('igniter.checkout.beforePayment', [$order, $data]);
 
@@ -147,7 +209,26 @@ class OrderManager
         if (!$paymentMethod OR !$paymentMethod->status)
             throw new ApplicationException('Selected payment method is inactive, try a different one.');
 
-        $result = $paymentMethod->processPaymentForm($data, $paymentMethod, $order);
+        if (!$paymentMethod->isApplicable($order->order_total, $paymentMethod))
+            throw new ApplicationException(sprintf(
+                lang('igniter.payregister::default.alert_min_order_total'),
+                currency_format($paymentMethod->order_total),
+                $paymentMethod->name
+            ));
+
+        if ($paymentMethod->hasApplicableFee() AND !optional($this->cart->getCondition('paymentFee'))->isApplied()) {
+            throw new ApplicationException(sprintf(
+                lang('igniter.payregister::default.alert_missing_applicable_fee'),
+                $paymentMethod->name
+            ));
+        }
+
+        if (array_get($data, 'pay_from_profile') == 1) {
+            $result = $paymentMethod->payFromPaymentProfile($order, $data);
+        }
+        else {
+            $result = $paymentMethod->processPaymentForm($data, $paymentMethod, $order);
+        }
 
         return $result;
     }
@@ -167,6 +248,10 @@ class OrderManager
         $order->cart = $this->cart->content();
         $order->order_total = $this->cart->total();
 
+        $order->payment = $order->order_total > 0 ? $this->getCurrentPaymentCode() : '';
+
+        $this->applyCurrentPaymentFee($order->payment);
+
         $order->ip_address = Request::getClientIp();
     }
 
@@ -183,7 +268,7 @@ class OrderManager
         ];
     }
 
-    protected function getCartTotals()
+    public function getCartTotals()
     {
         $totals = $this->cart->conditions()->map(function (CartCondition $condition) {
             $priority = $condition->getPriority();
@@ -213,14 +298,17 @@ class OrderManager
         return $totals;
     }
 
+    /**
+     * @param \Admin\Models\Orders_model $order
+     * @return bool
+     */
     protected function processPaymentLessForm($order)
     {
         if ($order->order_total > 0)
             return FALSE;
 
-        if ($order->markAsPaymentProcessed()) {
-            $order->updateOrderStatus(setting('default_order_status'), ['notify' => FALSE]);
-        }
+        $order->updateOrderStatus(setting('default_order_status'), ['notify' => FALSE]);
+        $order->markAsPaymentProcessed();
 
         return TRUE;
     }
@@ -232,7 +320,7 @@ class OrderManager
     public function clearOrder()
     {
         $this->cart->destroy($this->getCustomerId());
-        $this->clearCurrentOrderId();
+        $this->resetSession();
     }
 
     /**
@@ -242,7 +330,7 @@ class OrderManager
      */
     public function setCurrentOrderId($orderId)
     {
-        Session::put($this->sessionKey, $orderId);
+        $this->putSession('id', $orderId);
     }
 
     /**
@@ -252,7 +340,7 @@ class OrderManager
      */
     public function getCurrentOrderId()
     {
-        return Session::get($this->sessionKey);
+        return $this->getSession('id');
     }
 
     /**
@@ -260,7 +348,7 @@ class OrderManager
      */
     public function clearCurrentOrderId()
     {
-        Session::forget($this->sessionKey);
+        $this->forgetSession('id');
     }
 
     /**
@@ -273,5 +361,29 @@ class OrderManager
     public function isCurrentOrderId($orderId)
     {
         return $this->getCurrentOrderId() == $orderId;
+    }
+
+    public function setCurrentPaymentCode($code)
+    {
+        $this->putSession('paymentCode', $code);
+    }
+
+    public function getCurrentPaymentCode()
+    {
+        return $this->getSession('paymentCode', optional($this->getDefaultPayment())->code);
+    }
+
+    public function applyCurrentPaymentFee($code)
+    {
+        $this->setCurrentPaymentCode($code);
+
+        if (!$condition = $this->cart->getCondition('paymentFee'))
+            return;
+
+        $condition->setMetaData(['code' => $code]);
+
+        $this->cart->loadCondition($condition);
+
+        return $condition;
     }
 }

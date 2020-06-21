@@ -2,6 +2,7 @@
 
 use Admin\Models\Menus_model as BaseMenus_model;
 use Igniter\Flame\Cart\Contracts\Buyable;
+use Igniter\Flame\Location\Models\AbstractLocation;
 
 class Menus_model extends BaseMenus_model implements Buyable
 {
@@ -14,7 +15,7 @@ class Menus_model extends BaseMenus_model implements Buyable
 
     public function isAvailable()
     {
-        if (!$mealtime = $this->mealtime()->first())
+        if (!$mealtime = $this->mealtime)
             return TRUE;
 
         if (!$mealtime->mealtime_status)
@@ -25,7 +26,7 @@ class Menus_model extends BaseMenus_model implements Buyable
 
     public function iSpecial()
     {
-        if (!$special = $this->special()->first())
+        if (!$special = $this->special)
             return FALSE;
 
         return $special->active();
@@ -43,13 +44,20 @@ class Menus_model extends BaseMenus_model implements Buyable
 
     public function checkStockLevel($quantity = 0)
     {
-        if ($this->stock_qty < $this->minimum_qty)
+        if ($this->stock_qty == 0)
+            return TRUE;
+
+        return $this->stock_qty >= $quantity;
+    }
+
+    public function hasOrderTypeRestriction($orderType)
+    {
+        if (empty($this->order_restriction))
             return FALSE;
 
-        if ($quantity < $this->minimum_qty)
-            return FALSE;
+        $orderTypes = [AbstractLocation::DELIVERY => 1, AbstractLocation::COLLECTION => 2];
 
-        return $this->stock_qty > $quantity;
+        return array_get($orderTypes, $orderType, $orderType) != $this->order_restriction;
     }
 
     /**
@@ -57,7 +65,7 @@ class Menus_model extends BaseMenus_model implements Buyable
      *
      * @return int|string
      */
-    public function getBuyableIdentifier($options = null)
+    public function getBuyableIdentifier()
     {
         return $this->getKey();
     }
@@ -67,7 +75,7 @@ class Menus_model extends BaseMenus_model implements Buyable
      *
      * @return string
      */
-    public function getBuyableName($options = null)
+    public function getBuyableName()
     {
         return $this->menu_name;
     }
@@ -77,14 +85,10 @@ class Menus_model extends BaseMenus_model implements Buyable
      *
      * @return float
      */
-    public function getBuyablePrice($options = null)
+    public function getBuyablePrice()
     {
         $price = $this->iSpecial()
             ? $this->special->getMenuPrice($this->menu_price) : $this->menu_price;
-
-        if (is_array($options)) {
-            $price += collect($options)->sum('price');
-        }
 
         return $price;
     }

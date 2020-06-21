@@ -1,25 +1,37 @@
 <?php namespace Igniter\Cart\Components;
 
-use Admin\Models\Menu_item_options_model;
 use ApplicationException;
 use Cart;
 use Exception;
-use Igniter\Cart\Models\Coupons_model;
-use Igniter\Cart\Models\Menus_model;
+use Igniter\Cart\Classes\CartManager;
+use Igniter\Cart\Models\CartSettings;
 use Location;
-use Main\Template\Page;
 use Redirect;
 use Request;
 
 class CartBox extends \System\Classes\BaseComponent
 {
+    use \Main\Traits\UsesPage;
+
+    /**
+     * @var \Igniter\Cart\Classes\CartManager
+     */
+    protected $cartManager;
+
+    public function initialize()
+    {
+        $this->cartManager = CartManager::instance()->checkStock(
+            (bool)$this->property('checkStockCheckout', TRUE)
+        );
+    }
+
     public function defineProperties()
     {
         return [
-            'timeFormat' => [
-                'label' => 'Time format',
+            'cartBoxTimeFormat' => [
+                'label' => 'Time format for the delivery and pickup time',
                 'type' => 'text',
-                'default' => 'D H:i a',
+                'default' => 'ddd hh:mm a',
             ],
             'showCartItemThumb' => [
                 'label' => 'Show cart menu item image in the popup',
@@ -53,22 +65,27 @@ class CartBox extends \System\Classes\BaseComponent
                 'type' => 'switch',
                 'default' => FALSE,
             ],
+            'hideZeroOptionPrices' => [
+                'label' => 'Whether to hide zero prices on options',
+                'type' => 'switch',
+                'default' => FALSE,
+            ],
             'checkoutPage' => [
                 'label' => 'Checkout Page',
                 'type' => 'select',
+                'options' => [static::class, 'getThemePageOptions'],
                 'default' => 'checkout/checkout',
+            ],
+            'localBoxAlias' => [
+                'label' => 'Specify the LocalBox component alias used to refresh the localbox after the order type is changed',
+                'type' => 'text',
+                'default' => 'localBox',
             ],
         ];
     }
 
-    public static function getCheckoutPageOptions()
-    {
-        return Page::lists('baseFileName', 'baseFileName');
-    }
-
     public function onRun()
     {
-        $this->addCss('css/cartbox.css', 'cart-box-css');
         $this->addJs('js/cartbox.js', 'cart-box-js');
         $this->addJs('js/cartitem.js', 'cart-item-js');
         $this->addJs('js/cartbox.modal.js', 'cart-box-modal-js');
@@ -81,67 +98,58 @@ class CartBox extends \System\Classes\BaseComponent
         $this->page['showCartItemThumb'] = $this->property('showCartItemThumb', FALSE);
         $this->page['cartItemThumbWidth'] = $this->property('cartItemThumbWidth');
         $this->page['cartItemThumbHeight'] = $this->property('cartItemThumbHeight');
-        $this->page['cartBoxTimeFormat'] = $this->property('timeFormat');
+        $this->page['cartBoxTimeFormat'] = $this->property('cartBoxTimeFormat');
         $this->page['pageIsCart'] = $this->property('pageIsCart');
         $this->page['pageIsCheckout'] = $this->property('pageIsCheckout');
+        $this->page['hideZeroOptionPrices'] = (bool)$this->property('hideZeroOptionPrices');        
 
         $this->page['checkoutEventHandler'] = $this->getEventHandler('onProceedToCheckout');
-        $this->page['changeOrderTypeEventHandler'] = $this->getEventHandler('onChangeOrderType');
         $this->page['updateCartItemEventHandler'] = $this->getEventHandler('onUpdateCart');
         $this->page['applyCouponEventHandler'] = $this->getEventHandler('onApplyCoupon');
+        $this->page['applyTipEventHandler'] = $this->getEventHandler('onApplyTip');
         $this->page['loadCartItemEventHandler'] = $this->getEventHandler('onLoadItemPopup');
         $this->page['removeCartItemEventHandler'] = $this->getEventHandler('onRemoveItem');
         $this->page['removeConditionEventHandler'] = $this->getEventHandler('onRemoveCondition');
+        $this->page['refreshCartEventHandler'] = $this->getEventHandler('onRefresh');
 
-        $this->page['cart'] = Cart::instance();
+        $this->page['cart'] = $this->cartManager->getCart();
         $this->page['location'] = Location::instance();
         $this->page['locationCurrent'] = Location::current();
     }
 
-    public function onChangeOrderType()
+    public function fetchPartials()
     {
-        try {
-            if (!$location = Location::current())
-                throw new ApplicationException(lang('igniter.cart::default.alert_location_required'));
+        $this->prepareVars();
 
-            if (!Location::checkOrderType($orderType = post('type')))
-                throw new ApplicationException(lang('igniter.cart::default.alert_'.$orderType.'_unavailable'));
+        return [
+            '#notification' => $this->renderPartial('flash'),
+            '#cart-items' => $this->renderPartial('@items'),
+            '#cart-coupon' => $this->renderPartial('@coupon_form'),
+            '#cart-tip' => $this->renderPartial('@tip_form'),
+            '#cart-totals' => $this->renderPartial('@totals'),
+            '#cart-buttons' => $this->renderPartial('@buttons'),
+            '[data-cart-total]' => currency_format(Cart::total()),
+        ];
+    }
 
-            Location::updateOrderType($orderType);
-
-            $this->controller->pageCycle();
-
-            $partials = [
-                '#notification' => $this->renderPartial('flash'),
-                '#cart-control' => $this->renderPartial('@control'),
-                '#cart-totals' => $this->renderPartial('@totals'),
-                '#cart-buttons' => $this->renderPartial('@buttons'),
-            ];
-
-            if ($this->property('pageIsCheckout'))
-                return Redirect::to($this->controller->pageUrl($this->property('checkoutPage')));
-
-            return $partials;
-        }
-        catch (Exception $ex) {
-            if (Request::ajax()) throw $ex;
-            else flash()->danger($ex->getMessage())->now();
-        }
+    public function onRefresh()
+    {
+        return $this->fetchPartials();
     }
 
     public function onLoadItemPopup()
     {
-        if (!is_numeric($menuId = post('menuId')))
-            throw new ApplicationException(lang('igniter.cart::default.alert_no_menu_selected'));
-
-        if (!$menuItem = Menus_model::find($menuId))
-            throw new ApplicationException(lang('igniter.cart::default.alert_menu_not_found'));
+        $menuItem = $this->cartManager->findMenuItem(post('menuId'));
 
         $cartItem = null;
-        if ($rowId = post('rowId')) {
-            $cartItem = Cart::get($rowId);
+        if (strlen($rowId = post('rowId'))) {
+            $cartItem = $this->cartManager->getCartItem($rowId);
             $menuItem = $cartItem->model;
         }
+
+        $this->cartManager->validateMenuItem($menuItem);
+
+        $this->cartManager->validateMenuItemStockQty($menuItem, $cartItem ? $cartItem->qty : 0);
 
         $this->controller->pageCycle();
 
@@ -155,58 +163,13 @@ class CartBox extends \System\Classes\BaseComponent
     public function onUpdateCart()
     {
         try {
-            if (!$location = Location::current())
-                throw new ApplicationException(lang('igniter.cart::default.alert_location_required'));
+            $postData = post();
 
-            if (!$location->hasFutureOrder() AND Location::isClosed())
-                throw new ApplicationException(lang('igniter.cart::default.alert_location_closed'));
-
-            if (!Location::checkOrderType($orderType = Location::orderType()))
-                throw new ApplicationException(lang('igniter.local::default.alert_'.$orderType.'_unavailable'));
-
-            if (Location::orderTypeIsDelivery() AND Location::requiresUserPosition() AND !Location::userPosition()->isValid())
-                throw new ApplicationException(lang('igniter.cart::default.alert_no_search_query'));
-
-            if (!is_numeric($menuId = post('menuId')))
-                throw new ApplicationException(lang('igniter.cart::default.alert_no_menu_selected'));
-
-            $menuModel = Menus_model::find($menuId);
-
-            $cartItem = null;
-            if ($rowId = post('rowId')) {
-                $cartItem = Cart::get($rowId);
-                $menuModel = $cartItem->model;
-            }
-
-            $quantity = post('quantity');
-            $comment = post('comment');
-            $this->validateMenuItem($menuModel, $quantity);
-
-            $options = $this->createCartItemOptionsArray($menuModel, post('menu_options'));
-
-            if ($cartItem) {
-                Cart::update($cartItem->rowId, [
-                    'name' => $menuModel->getBuyableName($options),
-                    'price' => $menuModel->getBuyablePrice($options),
-                    'qty' => $quantity,
-                    'options' => $options,
-                    'comment' => $comment,
-                ]);
-            }
-            else {
-                Cart::add($menuModel, $quantity, $options, $comment);
-            }
+            $this->cartManager->addOrUpdateCartItem($postData);
 
             $this->controller->pageCycle();
 
-            return [
-                '#notification' => $this->renderPartial('flash'),
-                '#cart-items' => $this->renderPartial('@items'),
-                '#cart-coupon' => $this->renderPartial('@coupon_form'),
-                '#cart-totals' => $this->renderPartial('@totals'),
-                '#cart-total' => currency_format(Cart::total()),
-                '#cart-buttons' => $this->renderPartial('@buttons'),
-            ];
+            return $this->fetchPartials();
         }
         catch (Exception $ex) {
             if (Request::ajax()) throw $ex;
@@ -216,46 +179,56 @@ class CartBox extends \System\Classes\BaseComponent
 
     public function onRemoveItem()
     {
-        $cartItem = Cart::get($rowId = post('rowId'));
+        try {
+            $rowId = (string)post('rowId');
+            $quantity = (int)post('quantity');
 
-        if (!$menuItem = Menus_model::find($cartItem->id))
-            throw new ApplicationException(lang('igniter.cart::default.alert_menu_not_found'));
+            $this->cartManager->updateCartItemQty($rowId, $quantity);
 
-        $quantity = $cartItem->qty - $menuItem->minimum_qty;
-        Cart::update($rowId, post('quantity', $quantity));
+            $this->controller->pageCycle();
 
-        $this->controller->pageCycle();
-
-        return [
-            '#notification' => $this->renderPartial('flash'),
-            '#cart-items' => $this->renderPartial('@items'),
-            '#cart-coupon' => $this->renderPartial('@coupon_form'),
-            '#cart-totals' => $this->renderPartial('@totals'),
-            '#cart-buttons' => $this->renderPartial('@buttons'),
-        ];
+            return $this->fetchPartials();
+        }
+        catch (Exception $ex) {
+            if (Request::ajax()) throw $ex;
+            else flash()->alert($ex->getMessage());
+        }
     }
 
     public function onApplyCoupon()
     {
         try {
-            $coupon = Coupons_model::isEnabled()->whereCode($code = post('code'))->first();
-
-            if (!$coupon)
-                throw new ApplicationException(lang('igniter.cart::default.alert_coupon_invalid'));
-
-            $condition = Cart::getCondition('coupon');
-
-            $condition->setMetaData('code', $code);
-
-            Cart::condition($condition);
+            $this->cartManager->applyCouponCondition(post('code'));
 
             $this->controller->pageCycle();
 
-            return [
-                '#notification' => $this->renderPartial('flash'),
-                '#cart-totals' => $this->renderPartial('@totals'),
-                '#cart-buttons' => $this->renderPartial('@buttons'),
-            ];
+            return $this->fetchPartials();
+        }
+        catch (Exception $ex) {
+            if (Request::ajax()) throw $ex;
+            else flash()->alert($ex->getMessage());
+        }
+    }
+
+    public function onApplyTip()
+    {
+        try {
+            $amountType = post('amount_type');
+            if (!in_array($amountType, ['none', 'amount', 'custom']))
+                throw new ApplicationException(lang('igniter.cart::default.alert_tip_not_applied'));
+
+            $amount = post('amount');
+//            if (preg_match('/^\d+([\.\d]{2})?([%])?$/', $amount) === FALSE)
+//                throw new ApplicationException(lang('igniter.cart::default.alert_tip_not_applied'));
+
+            $this->cartManager->applyCondition('tip', [
+                'amountType' => $amountType,
+                'amount' => $amount,
+            ]);
+
+            $this->controller->pageCycle();
+
+            return $this->fetchPartials();
         }
         catch (Exception $ex) {
             if (Request::ajax()) throw $ex;
@@ -265,24 +238,26 @@ class CartBox extends \System\Classes\BaseComponent
 
     public function onRemoveCondition()
     {
-        $condition = Cart::getCondition($modifierId = post('conditionId'));
+        try {
+            if (!strlen($conditionId = post('conditionId')))
+                return;
 
-        Cart::removeCondition($condition->name);
+            $this->cartManager->removeCondition($conditionId);
+            $this->controller->pageCycle();
 
-        $this->controller->pageCycle();
-
-        return [
-            '#notification' => $this->renderPartial('flash'),
-            '#cart-totals' => $this->renderPartial('@totals'),
-            '#cart-buttons' => $this->renderPartial('@buttons'),
-        ];
+            return $this->fetchPartials();
+        }
+        catch (Exception $ex) {
+            if (Request::ajax()) throw $ex;
+            else flash()->alert($ex->getMessage());
+        }
     }
 
     public function onProceedToCheckout()
     {
         try {
             if (!is_numeric($id = post('locationId')) OR !$location = Location::getById($id))
-                throw new ApplicationException(lang('igniter.cart::default.alert_location_required'));
+                throw new ApplicationException(lang('igniter.local::default.alert_location_required'));
 
             Location::setCurrent($location);
 
@@ -296,107 +271,54 @@ class CartBox extends \System\Classes\BaseComponent
         }
     }
 
-    /**
-     * @param $menuModel Menus_model
-     * @param $options
-     * @return mixed
-     */
-    protected function createCartItemOptionsArray($menuModel, $options)
+    public function locationIsClosed()
     {
-        $selectedOptions = collect($options)->keyBy('menu_option_id');
+        $location = Location::instance();
+        $workingSchedule = $location->workingSchedule($location->orderType());
+        if ($workingSchedule->isClosed() AND !$location->current()->hasFutureOrder())
+            return TRUE;
 
-        $optionsArray = $menuModel->menu_options->keyBy('menu_option_id')->map(
-            function (Menu_item_options_model $menuOption) use ($selectedOptions) {
-                $menuOptionId = $menuOption->getKey();
-                $selectedOption = $selectedOptions->get($menuOptionId);
-
-                if (!$this->validateMenuItemOption($menuOption, $selectedOption))
-                    return FALSE;
-
-                $option['menu_option_id'] = $menuOption->menu_option_id;
-                $option['name'] = $menuOption->option_name;
-
-                $optionValues = $this->mapMenuOptionValues($menuOption, $selectedOption);
-
-                $option['price'] = $optionValues->sum('price');
-                $option['values'] = $optionValues->filter()->all();
-
-                return $option;
-            }
-        );
-
-        return $optionsArray->filter()->toArray();
+        return !$location->checkOrderType() ? TRUE : FALSE;
     }
 
-    /**
-     * @param $menuModel Menus_model
-     * @param $quantity
-     * @throws ApplicationException
-     */
-    protected function validateMenuItem($menuModel, $quantity)
+    public function hasMinimumOrder()
     {
-        if (!$menuModel)
-            throw new ApplicationException(lang('igniter.cart::default.alert_menu_not_found'));
+        $location = Location::instance();
+        $subtotal = $this->cartManager->getCart()->subtotal();
 
-        // if menu mealtime is enabled and menu is outside mealtime
-        if (!$menuModel->isAvailable())
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_menu_not_within_mealtime'),
-                $menuModel->menu_name,
-                $menuModel->mealtime->mealtime_name,
-                $menuModel->mealtime->start_time,
-                $menuModel->mealtime->end_time));
-
-        if ($quantity == 0 OR $menuModel->minimum_qty == 0)
-            return;
-
-        // Quantity is valid if its divisive by the minimum quantity
-        if (($quantity % $menuModel->minimum_qty) > 0)
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_qty_is_invalid'),
-                $menuModel->minimum_qty));
-
-        $checkStock = (bool)$this->property('checkStockCheckout', TRUE);
-
-        // checks if stock quantity is less than or equal to zero
-        if ($checkStock AND $menuModel->outOfStock())
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_out_of_stock'),
-                $menuModel->menu_name));
-
-        // checks if stock quantity is less than the cart quantity
-        if ($checkStock AND !$menuModel->checkStockLevel($quantity))
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_low_on_stock'),
-                $menuModel->menu_name,
-                $menuModel->stock_qty));
-
-        // if cart quantity is less than minimum quantity
-        if (!$menuModel->checkMinQuantity($quantity))
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_qty_is_below_min_qty'),
-                $menuModel->minimum_qty));
+        return ($location->orderTypeIsDelivery() AND !$location->checkMinimumOrder($subtotal));
     }
 
-    protected function validateMenuItemOption($menuOption, $selectedOption)
+    public function buttonLabel()
     {
-        $selectedOptionValues = array_get($selectedOption, 'option_values', []);
+        if ($this->locationIsClosed())
+            return lang('igniter.cart::default.text_is_closed');
 
-        if ($menuOption->isRequired() AND !array_filter($selectedOptionValues))
-            throw new ApplicationException(sprintf(lang('igniter.cart::default.alert_option_required'),
-                $menuOption->option_name));
+        if (!$this->property('pageIsCheckout'))
+            return lang('igniter.cart::default.button_order');
 
-        return count($selectedOptionValues);
+        return lang('igniter.cart::default.button_confirm');
     }
 
-    protected function mapMenuOptionValues($menuOption, $selectedOption)
+    public function tippingEnabled()
     {
-        return $menuOption->menu_option_values->keyBy('menu_option_value_id')->map(
-            function ($optionValue) use ($selectedOption) {
-                if (!in_array($optionValue->menu_option_value_id, $selectedOption['option_values']))
-                    return FALSE;
+        return (bool)CartSettings::get('enable_tipping');
+    }
 
-                return array_only($optionValue->toArray(), [
-                    'menu_option_value_id',
-                    'name',
-                    'price',
-                ]);
-            }
-        );
+    public function tippingAmounts()
+    {
+        $result = [];
+
+        $tipValueType = CartSettings::get('tip_value_type', 'F');
+        $amounts = (array)CartSettings::get('tip_amounts', []);
+
+        $amounts = sort_array($amounts, 'priority');
+
+        foreach ($amounts as $index => $amount) {
+            $amount['valueType'] = $tipValueType;
+            $result[$index] = (object)$amount;
+        }
+
+        return $result;
     }
 }

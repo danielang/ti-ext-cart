@@ -1,9 +1,9 @@
 <?php
 
-namespace Igniter\Cart\EventRules\Events;
+namespace Igniter\Cart\AutomationRules\Events;
 
 use Admin\Models\Orders_model;
-use Igniter\EventRules\Classes\BaseEvent;
+use Igniter\Automation\Classes\BaseEvent;
 
 class NewOrderStatus extends BaseEvent
 {

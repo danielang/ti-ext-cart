@@ -11,7 +11,6 @@
 
     CartBox.prototype.init = function () {
         $(document).on('click', '[data-cart-control]', $.proxy(this.onControlClick, this))
-        this.$el.on('change', '[data-cart-toggle="order-type"]', $.proxy(this.onOrderTypeToggle, this))
     }
 
     CartBox.prototype.initAffix = function () {
@@ -29,12 +28,13 @@
         })
     }
 
-    CartBox.prototype.refreshCart = function (event) {
+    CartBox.prototype.refreshCart = function ($el) {
+        $.request(this.options.refreshCartHandler)
     }
 
     CartBox.prototype.loadItem = function ($el) {
         var modalOptions = $.extend({}, this.options, $el.data(), {
-            onSubmit: function () {
+            onSuccess: function () {
                 this.hide()
             }
         })
@@ -45,9 +45,6 @@
     CartBox.prototype.addItem = function ($el) {
         $.request(this.options.updateItemHandler, {
             data: $el.data(),
-            loading: function () {
-                console.log('loading')
-            }
         })
     }
 
@@ -65,20 +62,42 @@
         })
     }
 
+    CartBox.prototype.applyTip = function ($el) {
+        var $input = this.$el.find('[name="amount"]'),
+            amountType = this.$el.find('[name="amount_type"]').val()
+
+        $.request(this.options.applyTipHandler, {
+            data: {amount: $input.val(), amount_type: amountType}
+        })
+    }
+
+    CartBox.prototype.updateTipAmount = function ($el) {
+        var tipAmountType = $el.data('tipAmountType'),
+            tipValue = $el.data('tipValue'),
+            $tipCustomInput = this.$el.find('[data-tip-custom]')
+
+        if ($el.hasClass('active'))
+            return
+
+        $tipCustomInput.hide();
+        this.$el.find('[name="amount_type"]').val(tipAmountType);
+        this.$el.find('[name="amount"]').val(tipValue !== undefined ? tipValue : 0);
+
+        if (tipAmountType === 'custom') {
+            $tipCustomInput.show();
+            this.$el.find('[data-tip-amount-type]').removeClass('active')
+            this.$el.find('[data-tip-amount-type="custom"]').addClass('active')
+            return
+        }
+
+        this.$el.find('[data-cart-control="tip-amount"]').prop('disabled', true)
+        this.applyTip()
+    }
+
     CartBox.prototype.removeCondition = function ($el) {
         $.request(this.options.removeConditionHandler, {
             data: {conditionId: $el.data('cartConditionId')}
         })
-    }
-
-    CartBox.prototype.confirmCheckout = function ($el) {
-        var _event = jQuery.Event('submitCheckoutForm'),
-            $checkoutForm = $($el.data('request-form'))
-
-        $checkoutForm.trigger(_event)
-        if (_event.isDefaultPrevented()) return
-
-        $checkoutForm.request()
     }
 
     // EVENT HANDLERS
@@ -96,7 +115,7 @@
                 this.addItem($el)
                 break
             case 'refresh':
-                this.refresh($el)
+                this.refreshCart($el)
                 break
             case 'remove-item':
                 this.removeItem($el)
@@ -107,30 +126,25 @@
             case 'apply-coupon':
                 this.applyCoupon($el)
                 break
-            case 'confirm-checkout':
-                this.confirmCheckout($el)
+            case 'apply-tip':
+                this.applyTip($el)
+                break
+            case 'tip-amount':
+                this.updateTipAmount($el)
                 break
         }
 
         return false
     }
 
-    CartBox.prototype.onOrderTypeToggle = function (event) {
-        var $el = $(event.currentTarget)
-        $.request(this.options.changeOrderTypeHandler, {
-            data: {'type': $el.val()}
-        })
-    }
-
     CartBox.DEFAULTS = {
         alias: 'cart',
-        checkoutHandler: null,
         loadItemHandler: null,
         updateItemHandler: null,
         removeItemHandler: null,
         applyCouponHandler: null,
-        removeConditionHandler: null,
-        changeOrderTypeHandler: null,
+        applyTipHandler: null,
+        removeConditionHandler: null
     }
 
     // PLUGIN DEFINITION

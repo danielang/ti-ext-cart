@@ -1,8 +1,8 @@
 <?php namespace Igniter\Cart\Database\Migrations;
 
-use Igniter\Cart\Models\CartSettings;
 use Illuminate\Database\Migrations\Migration;
-use System\Models\Extensions_model;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Add new cart total extension records as type 'total' in extensions table
@@ -16,15 +16,16 @@ class CreateConditionsSettings extends Migration
 
         foreach ($seedConditions as $condition) {
 
-            $data = array_get($condition, 'data');
+            $data = array_get((array)$condition, 'data');
             if (!is_array($data))
                 $data = unserialize($data);
 
             $conditions[$data['priority']] = array_get($data, 'name');
         }
 
-        if (!CartSettings::get('conditions'))
-            CartSettings::set('conditions', $conditions);
+        $table = DB::table('extension_settings')->where('item', 'igniter_cart_settings');
+        if (!$table->exists())
+            $table->update(['data' => serialize(['conditions' => $conditions])]);
     }
 
     public function down()
@@ -34,8 +35,11 @@ class CreateConditionsSettings extends Migration
 
     protected function getConditions()
     {
-        $existingConditions = Extensions_model::getQuery()->select('data')
-                                              ->where('type', 'cart_total')->get();
+        $existingConditions = [];
+        if (Schema::hasColumn('extensions', 'data')) {
+            $existingConditions = DB::table('extensions')->select('data')->where('type', 'cart_total')->get();
+        }
+
         if (!count($existingConditions))
             return [
                 [

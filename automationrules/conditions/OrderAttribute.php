@@ -1,7 +1,7 @@
-<?php namespace Igniter\Cart\EventRules\Conditions;
+<?php namespace Igniter\Cart\AutomationRules\Conditions;
 
 use ApplicationException;
-use Igniter\EventRules\Classes\BaseModelAttributesCondition;
+use Igniter\Automation\Classes\BaseModelAttributesCondition;
 
 class OrderAttribute extends BaseModelAttributesCondition
 {
